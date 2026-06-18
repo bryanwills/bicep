@@ -5,7 +5,6 @@ using Bicep.LanguageServer.Features.Custom.Visualization;
 using Bicep.LanguageServer.Features.Custom.Visualization.Models;
 using FluentAssertions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Range = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
 
 namespace Bicep.LangServer.UnitTests.Features.Visualization;
 
@@ -121,6 +120,39 @@ public class VisualGraphDifferTests
         update.NodeId.Should().Be("res");
         update.Changes.Type.Should().Be("Microsoft.Storage/storageAccounts");
         update.Changes.HasError.Should().Be(true);
+        // Unchanged fields are omitted so the client applies the minimal delta.
+        update.Changes.IsCollection.Should().BeNull();
+        update.Changes.HasChildren.Should().BeNull();
+    }
+
+    [TestMethod]
+    public void Diff_ForSurvivingNodes_WhenMetadataUnchanged_EmitsNoUpdate()
+    {
+        // A whitespace-only edit re-builds an identical canonical graph. Because source ranges are no longer
+        // part of node metadata, the differ must emit zero patches (O(0) chatter) rather than one update per node.
+        var current = new RenderedGraph(
+            Nodes:
+            [
+                Rendered("res", GraphNodeKind.Resource, parentId: null),
+                Rendered("mod", GraphNodeKind.Module, parentId: null),
+            ],
+            Edges: []);
+        var target = new CanonicalGraph(
+            Nodes:
+            [
+                Node("res", GraphNodeKind.Resource, parentId: null),
+                Node("mod", GraphNodeKind.Module, parentId: null),
+            ],
+            Edges: [],
+            ErrorCount: 0);
+
+        var patches = VisualGraphDiffer.Diff(current, target);
+
+        // Only the error-count refresh remains; no per-node patches.
+        patches.OfType<GraphPatch.UpdateNode>().Should().BeEmpty();
+        patches.OfType<GraphPatch.AddNode>().Should().BeEmpty();
+        patches.OfType<GraphPatch.RemoveNode>().Should().BeEmpty();
+        patches.OfType<GraphPatch.SetNodeLayout>().Should().BeEmpty();
     }
 
     [TestMethod]
@@ -360,14 +392,26 @@ public class VisualGraphDifferTests
             SymbolName: id,
             IsCollection: false,
             HasChildren: false,
-            HasError: hasError,
-            FilePath: "/main.bicep",
-            Range: new Range(0, 0, 0, 0));
+            HasError: hasError);
 
     private static GraphEdge Edge(string id, string sourceId, string targetId) => new(id, sourceId, targetId);
 
-    private static RenderedGraphNode Rendered(string id, string kind, string? parentId) =>
-        new(Id: id, Kind: kind, ParentId: parentId, Width: 100, Height: 50);
+    private static RenderedGraphNode Rendered(
+        string id,
+        string kind,
+        string? parentId,
+        string type = "Test.Rp/tests",
+        bool hasError = false) =>
+        new(
+            Id: id,
+            Kind: kind,
+            ParentId: parentId,
+            Type: type,
+            IsCollection: false,
+            HasChildren: false,
+            HasError: hasError,
+            Width: 100,
+            Height: 50);
 
     private static RenderedGraphEdge RenderedEdge(string id, string sourceId, string targetId) => new(id, sourceId, targetId);
 }

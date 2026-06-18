@@ -9,12 +9,11 @@ namespace Bicep.LanguageServer.Features.Custom.Visualization
     /// Computes the ordered <see cref="GraphPatch"/> delta that transforms the graph the client currently
     /// displays (<see cref="RenderedGraph"/>) into the server's freshly built <see cref="CanonicalGraph"/>.
     /// <para>
-    /// The submitted client graph intentionally carries only topology (id, kind, parentId) and measured size,
-    /// not node metadata, so the differ can detect structural changes precisely but cannot tell whether a
-    /// surviving node's metadata (error state, source range, type) changed. It therefore emits an idempotent
-    /// <see cref="GraphPatch.UpdateNode"/> refresh for every surviving node. This keeps the server stateless
-    /// per request at the cost of slightly chattier responses; applying an unchanged update is a no-op on the
-    /// client and never triggers a re-layout.
+    /// The submitted client graph carries each node's identity (id, kind, parentId), measured size, and the
+    /// layout-irrelevant metadata (type, isCollection, hasChildren, hasError). Because the metadata travels
+    /// with the request, the differ can emit an <see cref="GraphPatch.UpdateNode"/> only for nodes whose
+    /// metadata actually changed, while staying stateless per request. A whitespace-only edit therefore
+    /// produces no metadata patches at all (source ranges are resolved on demand and never diffed here).
     /// </para>
     /// <para>
     /// Layout (<see cref="GraphPatch.SetNodeLayout"/>) patches are emitted only when a non-empty
@@ -69,18 +68,17 @@ namespace Bicep.LanguageServer.Features.Custom.Visualization
                 patches.Add(new GraphPatch.AddNode(targetNode));
             }
 
-            // Refresh metadata for surviving nodes (see remarks on idempotent updates above).
+            // Refresh metadata for surviving nodes, but only for those whose metadata actually changed.
+            // The submitted graph carries each node's metadata, so the server can diff precisely and stay
+            // stateless: a whitespace-only edit (which changes nothing but source ranges, no longer part of
+            // the node) produces no UpdateNode patches at all.
             foreach (var targetNode in target.Nodes.OrderBy(node => node.Id, StringComparer.Ordinal))
             {
-                if (currentNodes.TryGetValue(targetNode.Id, out var renderedNode) && Survives(renderedNode, targetNode))
+                if (currentNodes.TryGetValue(targetNode.Id, out var renderedNode) &&
+                    Survives(renderedNode, targetNode) &&
+                    TryGetMetadataChanges(renderedNode, targetNode, out var changes))
                 {
-                    patches.Add(new GraphPatch.UpdateNode(targetNode.Id, new GraphNodeChanges(
-                        Type: targetNode.Type,
-                        IsCollection: targetNode.IsCollection,
-                        HasChildren: targetNode.HasChildren,
-                        HasError: targetNode.HasError,
-                        FilePath: targetNode.FilePath,
-                        Range: targetNode.Range)));
+                    patches.Add(new GraphPatch.UpdateNode(targetNode.Id, changes));
                 }
             }
 
@@ -145,6 +143,30 @@ namespace Bicep.LanguageServer.Features.Custom.Visualization
         // structural (re-parenting / kind flip), so the node is removed and re-added rather than updated.
         private static bool Survives(RenderedGraphNode renderedNode, GraphNode targetNode) =>
             renderedNode.Kind == targetNode.Kind && renderedNode.ParentId == targetNode.ParentId;
+
+        // Produces the changed-only metadata delta between the submitted node and the freshly built node.
+        // Returns false (and a null changeset) when no metadata field differs, so unchanged nodes emit no patch.
+        private static bool TryGetMetadataChanges(RenderedGraphNode renderedNode, GraphNode targetNode, out GraphNodeChanges changes)
+        {
+            var typeChanged = renderedNode.Type != targetNode.Type;
+            var isCollectionChanged = renderedNode.IsCollection != targetNode.IsCollection;
+            var hasChildrenChanged = renderedNode.HasChildren != targetNode.HasChildren;
+            var hasErrorChanged = renderedNode.HasError != targetNode.HasError;
+
+            if (!typeChanged && !isCollectionChanged && !hasChildrenChanged && !hasErrorChanged)
+            {
+                changes = new GraphNodeChanges();
+                return false;
+            }
+
+            changes = new GraphNodeChanges(
+                Type: typeChanged ? targetNode.Type : null,
+                IsCollection: isCollectionChanged ? targetNode.IsCollection : null,
+                HasChildren: hasChildrenChanged ? targetNode.HasChildren : null,
+                HasError: hasErrorChanged ? targetNode.HasError : null);
+
+            return true;
+        }
 
         private static int ContainmentDepth(string nodeId)
         {
